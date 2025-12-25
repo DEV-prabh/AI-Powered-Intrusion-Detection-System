@@ -1,26 +1,35 @@
-import streamlit as st
-import pandas as pd
 import os
-import time
-from datetime import datetime
 
+import pandas as pd
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh  # <-- 1. Import autorefresh
+
+# Paths
 DATA_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'captured_packets.csv')
 LOG_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'alerts.log')
 
 st.set_page_config(page_title='AI-Powered IDS Dashboard', layout='wide')
+
+# --- 2. SETUP AUTO-REFRESH ---
+# This refreshes the page every 2000 milliseconds (2 seconds)
+st_autorefresh(interval=2000, key="ids_dashboard_refresh")
+
 st.title('AI-Powered IDS for Home Networks')
 
 # Live traffic stats
 def load_packets():
     if os.path.exists(DATA_PATH):
-        return pd.read_csv(DATA_PATH)
+        try:
+            return pd.read_csv(DATA_PATH)
+        except Exception: # Handle cases where file is being written to
+            return pd.DataFrame()
     return pd.DataFrame()
 
 def load_alerts():
     if os.path.exists(LOG_PATH):
         with open(LOG_PATH) as f:
             lines = f.readlines()
-        return lines[-20:][::-1]  # Show last 20 alerts, newest first
+        return lines[-20:][::-1]
     return []
 
 packets = load_packets()
@@ -30,8 +39,18 @@ with col1:
     st.header('Live Traffic')
     st.write(f"Total packets captured: {len(packets)}")
     if not packets.empty:
-        st.dataframe(packets.tail(20))
-        st.line_chart(packets['packet_length'].tail(100))
+        # Convert timestamp to a datetime object for proper grouping
+        packets['timestamp'] = pd.to_datetime(packets['timestamp'])
+
+        # Group by second to see the VOLUME (spikes) instead of just length
+        traffic_volume = packets.resample('1S', on='timestamp').count()['src_ip']
+
+        st.subheader("Traffic Volume (Packets per Second)")
+        # This will now show "spikes" during an Nmap or DoS attack
+        st.line_chart(traffic_volume.tail(60))
+
+        st.subheader("Recent Raw Packets")
+        st.dataframe(packets.tail(20), use_container_width=True)
 
 with col2:
     st.header('Recent Alerts')
@@ -54,42 +73,16 @@ for line in alerts:
             break
         except Exception:
             continue
+
 if last_abuse:
+    st.sidebar.metric("Latest Abuse Score", f"{last_abuse.get('abuseConfidenceScore')}%")
     st.sidebar.write(f"**IP:** {last_abuse.get('ip')}")
-    st.sidebar.write(f"**Abuse Score:** {last_abuse.get('abuseConfidenceScore')}")
     st.sidebar.write(f"**Country:** {last_abuse.get('countryCode')}")
-    st.sidebar.write(f"**Usage:** {last_abuse.get('usageType')}")
+    st.sidebar.write(f"**ISP:** {last_abuse.get('isp', 'N/A')}")
     st.sidebar.write(f"**Domain:** {last_abuse.get('domain')}")
-    st.sidebar.write(f"**Total Reports:** {last_abuse.get('totalReports')}")
-    st.sidebar.write(f"**Last Reported:** {last_abuse.get('lastReportedAt')}")
     if last_abuse.get('abuseConfidenceScore', 0) >= 50:
-        st.sidebar.error('This IP was auto-blocked!')
+        st.sidebar.error('🚨 HIGH RISK IP AUTO-BLOCKED')
 else:
-    st.sidebar.info('No recent AbuseIPDB results.')
+    st.sidebar.info('No recent external threats detected.')
 
-# Optionally, show GeoIP info for suspicious IPs
-try:
-    import geoip2.database
-    GEOIP_DB = os.path.join(os.path.dirname(__file__), '..', 'data', 'GeoLite2-City.mmdb')
-    if os.path.exists(GEOIP_DB) and not packets.empty:
-        st.header('GeoIP Lookup (last suspicious IP)')
-        last_alert = alerts[0] if alerts else None
-        if last_alert:
-            import re
-            import ast
-            match = re.search(r"src_ip': '([^']+)'", last_alert)
-            if match:
-                ip = match.group(1)
-                reader = geoip2.database.Reader(GEOIP_DB)
-                try:
-                    response = reader.city(ip)
-                    st.write(f"IP: {ip}")
-                    st.write(f"Country: {response.country.name}")
-                    st.write(f"City: {response.city.name}")
-                except Exception as e:
-                    st.write(f"GeoIP lookup failed: {e}")
-                reader.close()
-except ImportError:
-    pass
-
-st.caption('AI-Powered IDS | Streamlit Dashboard') 
+st.caption('AI-Powered IDS | Real-time Streamlit Dashboard')
